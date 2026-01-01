@@ -3,12 +3,10 @@ services:
     name: rama-judicial-api
     env: node
     region: oregon
-    plan: starter
+    plan: free
     buildCommand: npm install
     startCommand: npm start
     healthCheckPath: /health
     envVars:
       - key: NODE_ENV
         value: production
-      - key: PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD
-        value: "0"

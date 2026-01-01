@@ -5,7 +5,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "postinstall": "playwright install --with-deps chromium"
+    "postinstall": "playwright install chromium"
   },
   "engines": {
     "node": ">=18"

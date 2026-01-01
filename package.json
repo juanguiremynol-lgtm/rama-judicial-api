@@ -4,8 +4,7 @@
   "description": "API para consultar procesos judiciales en Rama Judicial Colombia",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "postinstall": "playwright install chromium"
+    "start": "node server.js"
   },
   "engines": {
     "node": ">=18"

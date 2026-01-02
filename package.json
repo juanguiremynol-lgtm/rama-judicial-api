@@ -12,6 +12,6 @@
   "dependencies": {
     "express": "^4.19.2",
     "cors": "^2.8.5",
-    "playwright": "^1.54.1"
+    "playwright": "1.57.0"
   }
 }

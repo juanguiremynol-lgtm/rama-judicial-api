@@ -151,12 +151,32 @@ async function consultaRama(numeroProceso) {
         ficha[key] = tdText.trim();
       }
     }
+// 10. Ir a pestaña Sujetos Procesales
+await page.click('div.v-tab:has-text("Sujetos Procesales")');
+await page.waitForTimeout(1200);
 
-    // 10. Pestaña Actuaciones
+// 11. Extraer Sujetos Procesales
+const sujetosProcesales = [];
+
+const filasSujetos = await page
+  .locator("//table//tbody/tr")
+  .all();
+
+for (const fila of filasSujetos) {
+  const cols = await fila.locator("td").all();
+
+  if (cols.length >= 2) {
+    sujetosProcesales.push({
+      tipo: (await cols[0].innerText()).trim(),
+      nombre: (await cols[1].innerText()).trim(),
+    });
+  }
+}
+    // 11. Pestaña Actuaciones
     await page.click("div.v-tab:has-text('Actuaciones')");
     await page.waitForTimeout(1500);
 
-    // 11. Extraer actuaciones
+    // 12. Extraer actuaciones
     const actuaciones = [];
     const filasAct = await page.locator("//table//tbody/tr").all();
 

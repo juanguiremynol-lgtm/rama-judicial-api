@@ -1,178 +1,328 @@
-// Cliente para usar con el sistema de jobs async
-// Funciona en Lovable.dev y evita timeouts
+// server.js
+// API para consultar procesos judiciales en Rama Judicial Colombia
+// Con sistema de jobs asíncronos para evitar timeouts
 
-const API_URL = "TU_URL_DEL_SERVIDOR"; // Ejemplo: "https://tu-api.railway.app"
+const express = require("express");
+const cors = require("cors");
+const { chromium } = require("playwright");
 
-/**
- * Consulta un proceso judicial con polling automático
- * @param {string} numeroRadicacion - Número de radicación de 23 dígitos
- * @param {function} onProgress - Callback para actualizaciones de progreso
- * @returns {Promise<object>} - Resultado de la consulta
- */
-async function consultarProceso(numeroRadicacion, onProgress = null) {
+const app = express();
+app.disable("x-powered-by");
+app.set("trust proxy", true);
+
+app.use(express.json({ limit: "1mb" }));
+
+// ================== CORS ==================
+app.use(cors({ origin: "*", methods: ["GET"], allowedHeaders: ["Content-Type"] }));
+
+// ================== SISTEMA DE JOBS ==================
+const jobs = new Map(); // { jobId: { status, result, error, createdAt } }
+
+function createJob(numeroRadicacion) {
+  const jobId = `job_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  jobs.set(jobId, {
+    status: "processing",
+    numero_radicacion: numeroRadicacion,
+    result: null,
+    error: null,
+    createdAt: new Date(),
+  });
+  return jobId;
+}
+
+function updateJob(jobId, updates) {
+  const job = jobs.get(jobId);
+  if (job) {
+    jobs.set(jobId, { ...job, ...updates });
+  }
+}
+
+// Limpiar jobs viejos cada 10 minutos
+setInterval(() => {
+  const now = Date.now();
+  for (const [jobId, job] of jobs.entries()) {
+    if (now - job.createdAt.getTime() > 600000) { // 10 minutos
+      jobs.delete(jobId);
+    }
+  }
+}, 600000);
+
+// ================== HEALTH ==================
+app.get("/", (_req, res) =>
+  res.json({
+    message: "API Rama Judicial Colombia",
+    version: "3.0",
+    endpoints: {
+      "/health": "Estado de la API",
+      "/buscar?numero_radicacion=XXXXX": "Iniciar búsqueda (devuelve jobId)",
+      "/resultado/:jobId": "Consultar resultado de búsqueda",
+    },
+  })
+);
+
+app.get("/health", (_req, res) =>
+  res.json({ 
+    status: "ok", 
+    service: "Rama Judicial Scraper",
+    active_jobs: jobs.size 
+  })
+);
+
+// ================== BROWSER SINGLETON ==================
+let browserPromise = null;
+
+async function getBrowser() {
+  if (!browserPromise) {
+    console.log("[boot] Lanzando Chromium...");
+    browserPromise = chromium.launch({
+      channel: "chromium",
+      headless: true,
+      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+    });
+  }
+  return browserPromise;
+}
+
+// ================== SCRAPING ==================
+async function consultaRama(numeroProceso, jobId = null) {
+  const url = "https://consultaprocesos.ramajudicial.gov.co/Procesos/NumeroRadicacion";
+  const soloDigitos = numeroProceso.replace(/\D/g, "");
+
+  const browser = await getBrowser();
+  const page = await browser.newPage();
+
   try {
-    // 1. Iniciar la búsqueda
-    if (onProgress) onProgress({ status: "iniciando", message: "Iniciando búsqueda..." });
-    
-    const initResponse = await fetch(
-      `${API_URL}/buscar?numero_radicacion=${numeroRadicacion}`
+    console.log("[scraping] 1. Navegando...");
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
+
+    console.log("[scraping] 2. Llenando input...");
+    await page.fill(
+      "input[placeholder='Ingrese los 23 dígitos del número de Radicación']",
+      soloDigitos
     );
+
+    console.log("[scraping] 3. Consultando...");
+    await page.click("button:has-text('Consultar')");
     
-    if (!initResponse.ok) {
-      const error = await initResponse.json();
-      throw new Error(error.error || "Error al iniciar búsqueda");
+    await Promise.race([
+      page.waitForSelector(`text=${soloDigitos}`, { timeout: 10000 }),
+      page.waitForSelector("text=La consulta no generó resultados", { timeout: 10000 }),
+    ]);
+
+    const noResultados = await page.locator("text=La consulta no generó resultados").count();
+    if (noResultados > 0) {
+      console.log("[scraping] ❌ No se encontraron resultados");
+      return {
+        success: false,
+        estado: "NO_ENCONTRADO",
+        mensaje: "La consulta no generó resultados en la Rama Judicial",
+        numero_radicacion: soloDigitos,
+      };
     }
 
-    const { jobId, poll_url } = await initResponse.json();
-    console.log("Job creado:", jobId);
+    console.log("[scraping] 4. Abriendo resultado...");
+    await page.click(`text=${soloDigitos}`);
+    await page.waitForSelector("tbody", { timeout: 10000 });
 
-    // 2. Hacer polling hasta que complete
-    if (onProgress) onProgress({ status: "procesando", message: "Extrayendo datos..." });
+    // ================== FICHA DEL PROCESO ==================
+    console.log("[scraping] 5. Extrayendo ficha...");
+    const ficha = {};
+
+    const filas = await page
+      .locator("//tbody[.//th[contains(text(), 'Fecha de Radicación')]]//tr")
+      .all();
+
+    for (const fila of filas) {
+      const th = await fila.locator("th").first().innerText().catch(() => null);
+      const td = await fila.locator("td").first().innerText().catch(() => null);
+      if (th && td) {
+        ficha[th.replace(":", "").trim()] = td.trim();
+      }
+    }
+
+    // ================== SUJETOS PROCESALES ==================
+    console.log("[scraping] 6. Extrayendo sujetos procesales...");
     
-    const maxIntentos = 60; // 60 intentos = 1 minuto máximo
-    let intentos = 0;
-
-    while (intentos < maxIntentos) {
-      await new Promise(resolve => setTimeout(resolve, 2000)); // Esperar 2 segundos
+    let sujetosProcesales = [];
+    try {
+      await page.click('div.v-tab:has-text("Sujetos Procesales")');
+      await page.waitForSelector('table tbody tr', { timeout: 5000 });
       
-      const resultResponse = await fetch(`${API_URL}${poll_url}`);
-      const result = await resultResponse.json();
-
-      if (result.status === "completed") {
-        if (onProgress) onProgress({ status: "completado", message: "¡Búsqueda completada!" });
-        return result;
+      const todasLasFilas = await page.locator('table tbody tr').all();
+      
+      for (const fila of todasLasFilas) {
+        const celdas = await fila.locator('td').all();
+        
+        if (celdas.length === 2) {
+          const tipo = await celdas[0].innerText().catch(() => "");
+          const nombre = await celdas[1].innerText().catch(() => "");
+          
+          const tipoLimpio = tipo.trim();
+          const nombreLimpio = nombre.trim();
+          
+          if ((tipoLimpio === 'Demandante' || tipoLimpio === 'Demandado') && nombreLimpio) {
+            sujetosProcesales.push({
+              tipo: tipoLimpio,
+              nombre: nombreLimpio,
+            });
+          }
+        }
       }
 
-      if (result.status === "failed") {
-        throw new Error(result.error || "Error al procesar la búsqueda");
-      }
-
-      // Aún procesando
-      intentos++;
-      if (onProgress) {
-        onProgress({ 
-          status: "procesando", 
-          message: `Procesando... (${intentos * 2}s)` 
-        });
-      }
+      console.log(`[scraping] ✅ Sujetos encontrados: ${sujetosProcesales.length}`);
+      
+    } catch (error) {
+      console.log(`[scraping] ❌ Error extrayendo sujetos: ${error.message}`);
     }
 
-    throw new Error("Timeout: La búsqueda tomó demasiado tiempo");
+    // ================== ACTUACIONES ==================
+    console.log("[scraping] 7. Extrayendo actuaciones...");
+    
+    let actuaciones = [];
+    try {
+      await page.click('div.v-tab:has-text("Actuaciones")');
+      await page.waitForSelector('table tbody tr', { timeout: 5000 });
+      
+      const todasLasFilasAct = await page.locator('table tbody tr').all();
+
+      for (const fila of todasLasFilasAct) {
+        const cols = await fila.locator("td").all();
+        
+        if (cols.length >= 6) {
+          actuaciones.push({
+            "Fecha de Actuación": (await cols[0].innerText().catch(() => "")).trim(),
+            "Actuación": (await cols[1].innerText().catch(() => "")).trim(),
+            "Anotación": (await cols[2].innerText().catch(() => "")).trim(),
+            "Fecha inicia Término": (await cols[3].innerText().catch(() => "")).trim(),
+            "Fecha finaliza Término": (await cols[4].innerText().catch(() => "")).trim(),
+            "Fecha de Registro": (await cols[5].innerText().catch(() => "")).trim(),
+          });
+        }
+      }
+
+      console.log(`[scraping] ✅ Actuaciones encontradas: ${actuaciones.length}`);
+      
+    } catch (error) {
+      console.log(`[scraping] ❌ Error extrayendo actuaciones: ${error.message}`);
+    }
+
+    return {
+      success: true,
+      numero_radicacion: soloDigitos,
+      proceso: ficha,
+      sujetos_procesales: sujetosProcesales,
+      actuaciones: actuaciones,
+      total_actuaciones: actuaciones.length,
+      ultima_actuacion: actuaciones[0] || null,
+    };
 
   } catch (error) {
-    console.error("Error en consultarProceso:", error);
+    console.error("[scraping] ❌ Error:", error.message);
     throw error;
+  } finally {
+    await page.close();
   }
 }
 
-// ================== EJEMPLO DE USO EN REACT ==================
+// ================== ENDPOINTS ==================
 
-// Componente React para Lovable.dev
-function ConsultaProcesoComponent() {
-  const [numeroRadicacion, setNumeroRadicacion] = React.useState("");
-  const [loading, setLoading] = React.useState(false);
-  const [progress, setProgress] = React.useState(null);
-  const [resultado, setResultado] = React.useState(null);
-  const [error, setError] = React.useState(null);
-
-  const handleConsultar = async () => {
-    setLoading(true);
-    setError(null);
-    setResultado(null);
-    setProgress(null);
-
-    try {
-      const result = await consultarProceso(
-        numeroRadicacion,
-        (progressInfo) => {
-          setProgress(progressInfo);
-        }
-      );
-      
-      setResultado(result);
-      setProgress({ status: "completado", message: "✅ Búsqueda exitosa" });
-    } catch (err) {
-      setError(err.message);
-      setProgress(null);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  return (
-    <div className="p-6">
-      <h1 className="text-2xl font-bold mb-4">Consulta Rama Judicial</h1>
-      
-      <div className="mb-4">
-        <input
-          type="text"
-          value={numeroRadicacion}
-          onChange={(e) => setNumeroRadicacion(e.target.value)}
-          placeholder="Número de radicación (23 dígitos)"
-          className="border p-2 w-full rounded"
-          maxLength={23}
-        />
-      </div>
-
-      <button
-        onClick={handleConsultar}
-        disabled={loading || numeroRadicacion.length !== 23}
-        className="bg-blue-500 text-white px-4 py-2 rounded disabled:bg-gray-300"
-      >
-        {loading ? "Consultando..." : "Consultar"}
-      </button>
-
-      {progress && (
-        <div className="mt-4 p-4 bg-blue-50 rounded">
-          <p className="font-semibold">{progress.message}</p>
-        </div>
-      )}
-
-      {error && (
-        <div className="mt-4 p-4 bg-red-50 text-red-700 rounded">
-          <p>❌ {error}</p>
-        </div>
-      )}
-
-      {resultado && resultado.success && (
-        <div className="mt-4 p-4 bg-green-50 rounded">
-          <h2 className="font-bold text-lg mb-2">Resultado</h2>
-          <div className="space-y-2">
-            <p><strong>Radicación:</strong> {resultado.numero_radicacion}</p>
-            <p><strong>Total actuaciones:</strong> {resultado.total_actuaciones}</p>
-            
-            {resultado.ultima_actuacion && (
-              <div className="mt-2 p-2 bg-white rounded">
-                <p className="font-semibold">Última actuación:</p>
-                <p>{resultado.ultima_actuacion.Actuación}</p>
-                <p className="text-sm text-gray-600">
-                  {resultado.ultima_actuacion["Fecha de Actuación"]}
-                </p>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ================== EJEMPLO DE USO SIMPLE ==================
-
-// Uso directo sin React
-async function ejemploSimple() {
-  console.log("Iniciando consulta...");
+// Iniciar búsqueda (devuelve jobId inmediatamente)
+app.get("/buscar", async (req, res) => {
+  const radicado = req.query.numero_radicacion;
   
-  const resultado = await consultarProceso(
-    "11001020300020240012345", // Tu número de radicación
-    (progress) => console.log("Progreso:", progress.message)
-  );
-  
-  console.log("Resultado:", resultado);
-  
-  if (resultado.success) {
-    console.log("Proceso encontrado!");
-    console.log("Sujetos:", resultado.sujetos_procesales);
-    console.log("Actuaciones:", resultado.total_actuaciones);
+  if (!radicado) {
+    return res.status(400).json({ 
+      success: false, 
+      error: "Parámetro numero_radicacion requerido" 
+    });
   }
-}
+
+  const soloDigitos = radicado.replace(/\D/g, "");
+  if (soloDigitos.length !== 23) {
+    return res.status(400).json({ 
+      success: false, 
+      error: `El número debe tener 23 dígitos. Recibido: ${soloDigitos.length}` 
+    });
+  }
+
+  // Crear job y devolver inmediatamente
+  const jobId = createJob(soloDigitos);
+  console.log(`[job] 🆕 Creado: ${jobId} para ${radicado}`);
+
+  // Iniciar scraping en background
+  consultaRama(radicado, jobId)
+    .then(resultado => {
+      console.log(`[job] ✅ Completado: ${jobId}`);
+      updateJob(jobId, { 
+        status: "completed", 
+        result: resultado 
+      });
+    })
+    .catch(error => {
+      console.error(`[job] ❌ Error: ${jobId}`, error);
+      updateJob(jobId, { 
+        status: "failed", 
+        error: error.message 
+      });
+    });
+
+  // Responder inmediatamente con el jobId
+  res.json({
+    success: true,
+    jobId: jobId,
+    numero_radicacion: soloDigitos,
+    status: "processing",
+    message: "Búsqueda iniciada. Use /resultado/:jobId para consultar el resultado.",
+    poll_url: `/resultado/${jobId}`
+  });
+});
+
+// Consultar resultado de un job
+app.get("/resultado/:jobId", (req, res) => {
+  const { jobId } = req.params;
+  const job = jobs.get(jobId);
+
+  if (!job) {
+    return res.status(404).json({
+      success: false,
+      error: "Job no encontrado o expirado"
+    });
+  }
+
+  if (job.status === "processing") {
+    return res.json({
+      success: true,
+      jobId: jobId,
+      status: "processing",
+      numero_radicacion: job.numero_radicacion,
+      message: "La búsqueda está en proceso. Consulte nuevamente en unos segundos."
+    });
+  }
+
+  if (job.status === "completed") {
+    return res.json({
+      success: true,
+      jobId: jobId,
+      status: "completed",
+      ...job.result
+    });
+  }
+
+  if (job.status === "failed") {
+    return res.status(500).json({
+      success: false,
+      jobId: jobId,
+      status: "failed",
+      error: job.error
+    });
+  }
+});
+
+// ================== START ==================
+const PORT = process.env.PORT || 3000;
+const server = app.listen(PORT, () => {
+  console.log(`🚀 API Rama Judicial escuchando en puerto ${PORT}`);
+});
+
+server.requestTimeout = 120000;
+server.headersTimeout = 120000;

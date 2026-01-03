@@ -1,6 +1,6 @@
 // server.js
 // API para consultar procesos judiciales en Rama Judicial Colombia
-// Con sistema de jobs asíncronos para evitar timeouts
+// Con sistema de jobs asíncronos y rate limiting
 
 const express = require("express");
 const cors = require("cors");
@@ -15,13 +15,16 @@ app.use(express.json({ limit: "1mb" }));
 // ================== CORS ==================
 app.use(cors({ origin: "*", methods: ["GET"], allowedHeaders: ["Content-Type"] }));
 
-// ================== SISTEMA DE JOBS ==================
-const jobs = new Map(); // { jobId: { status, result, error, createdAt } }
+// ================== SISTEMA DE JOBS Y QUEUE ==================
+const jobs = new Map();
+const queue = [];
+let activeJobs = 0;
+const MAX_CONCURRENT_JOBS = 2; // Máximo 2 scraping simultáneos
 
 function createJob(numeroRadicacion) {
   const jobId = `job_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
   jobs.set(jobId, {
-    status: "processing",
+    status: "queued",
     numero_radicacion: numeroRadicacion,
     result: null,
     error: null,
@@ -37,11 +40,42 @@ function updateJob(jobId, updates) {
   }
 }
 
+// Procesar jobs en cola
+async function processQueue() {
+  if (activeJobs >= MAX_CONCURRENT_JOBS || queue.length === 0) {
+    return;
+  }
+
+  const { jobId, numeroRadicacion } = queue.shift();
+  activeJobs++;
+  
+  updateJob(jobId, { status: "processing" });
+  console.log(`[queue] ⚙️ Procesando: ${jobId} (${activeJobs}/${MAX_CONCURRENT_JOBS})`);
+
+  try {
+    const resultado = await consultaRama(numeroRadicacion, jobId);
+    console.log(`[queue] ✅ Completado: ${jobId}`);
+    updateJob(jobId, { 
+      status: "completed", 
+      result: resultado 
+    });
+  } catch (error) {
+    console.error(`[queue] ❌ Error: ${jobId}`, error);
+    updateJob(jobId, { 
+      status: "failed", 
+      error: error.message 
+    });
+  } finally {
+    activeJobs--;
+    processQueue(); // Procesar siguiente
+  }
+}
+
 // Limpiar jobs viejos cada 10 minutos
 setInterval(() => {
   const now = Date.now();
   for (const [jobId, job] of jobs.entries()) {
-    if (now - job.createdAt.getTime() > 600000) { // 10 minutos
+    if (now - job.createdAt.getTime() > 600000) {
       jobs.delete(jobId);
     }
   }
@@ -51,7 +85,7 @@ setInterval(() => {
 app.get("/", (_req, res) =>
   res.json({
     message: "API Rama Judicial Colombia",
-    version: "3.0",
+    version: "3.1",
     endpoints: {
       "/health": "Estado de la API",
       "/buscar?numero_radicacion=XXXXX": "Iniciar búsqueda (devuelve jobId)",
@@ -64,7 +98,9 @@ app.get("/health", (_req, res) =>
   res.json({ 
     status: "ok", 
     service: "Rama Judicial Scraper",
-    active_jobs: jobs.size 
+    active_jobs: activeJobs,
+    queued_jobs: queue.length,
+    total_jobs: jobs.size
   })
 );
 
@@ -77,7 +113,13 @@ async function getBrowser() {
     browserPromise = chromium.launch({
       channel: "chromium",
       headless: true,
-      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+      args: [
+        "--no-sandbox", 
+        "--disable-setuid-sandbox", 
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--disable-software-rasterizer"
+      ],
     });
   }
   return browserPromise;
@@ -92,26 +134,27 @@ async function consultaRama(numeroProceso, jobId = null) {
   const page = await browser.newPage();
 
   try {
-    console.log("[scraping] 1. Navegando...");
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
+    console.log(`[scraping ${jobId}] 1. Navegando...`);
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 40000 });
 
-    console.log("[scraping] 2. Llenando input...");
+    console.log(`[scraping ${jobId}] 2. Llenando input...`);
+    await page.waitForSelector("input[placeholder*='23 dígitos']", { timeout: 15000 });
     await page.fill(
-      "input[placeholder='Ingrese los 23 dígitos del número de Radicación']",
+      "input[placeholder*='23 dígitos']",
       soloDigitos
     );
 
-    console.log("[scraping] 3. Consultando...");
+    console.log(`[scraping ${jobId}] 3. Consultando...`);
     await page.click("button:has-text('Consultar')");
     
     await Promise.race([
-      page.waitForSelector(`text=${soloDigitos}`, { timeout: 10000 }),
-      page.waitForSelector("text=La consulta no generó resultados", { timeout: 10000 }),
+      page.waitForSelector(`text=${soloDigitos}`, { timeout: 15000 }),
+      page.waitForSelector("text=La consulta no generó resultados", { timeout: 15000 }),
     ]);
 
     const noResultados = await page.locator("text=La consulta no generó resultados").count();
     if (noResultados > 0) {
-      console.log("[scraping] ❌ No se encontraron resultados");
+      console.log(`[scraping ${jobId}] ❌ No se encontraron resultados`);
       return {
         success: false,
         estado: "NO_ENCONTRADO",
@@ -120,12 +163,12 @@ async function consultaRama(numeroProceso, jobId = null) {
       };
     }
 
-    console.log("[scraping] 4. Abriendo resultado...");
+    console.log(`[scraping ${jobId}] 4. Abriendo resultado...`);
     await page.click(`text=${soloDigitos}`);
-    await page.waitForSelector("tbody", { timeout: 10000 });
+    await page.waitForSelector("tbody", { timeout: 15000 });
 
     // ================== FICHA DEL PROCESO ==================
-    console.log("[scraping] 5. Extrayendo ficha...");
+    console.log(`[scraping ${jobId}] 5. Extrayendo ficha...`);
     const ficha = {};
 
     const filas = await page
@@ -141,12 +184,12 @@ async function consultaRama(numeroProceso, jobId = null) {
     }
 
     // ================== SUJETOS PROCESALES ==================
-    console.log("[scraping] 6. Extrayendo sujetos procesales...");
+    console.log(`[scraping ${jobId}] 6. Extrayendo sujetos procesales...`);
     
     let sujetosProcesales = [];
     try {
       await page.click('div.v-tab:has-text("Sujetos Procesales")');
-      await page.waitForSelector('table tbody tr', { timeout: 5000 });
+      await page.waitForSelector('table tbody tr', { timeout: 8000 });
       
       const todasLasFilas = await page.locator('table tbody tr').all();
       
@@ -169,19 +212,19 @@ async function consultaRama(numeroProceso, jobId = null) {
         }
       }
 
-      console.log(`[scraping] ✅ Sujetos encontrados: ${sujetosProcesales.length}`);
+      console.log(`[scraping ${jobId}] ✅ Sujetos encontrados: ${sujetosProcesales.length}`);
       
     } catch (error) {
-      console.log(`[scraping] ❌ Error extrayendo sujetos: ${error.message}`);
+      console.log(`[scraping ${jobId}] ❌ Error extrayendo sujetos: ${error.message}`);
     }
 
     // ================== ACTUACIONES ==================
-    console.log("[scraping] 7. Extrayendo actuaciones...");
+    console.log(`[scraping ${jobId}] 7. Extrayendo actuaciones...`);
     
     let actuaciones = [];
     try {
       await page.click('div.v-tab:has-text("Actuaciones")');
-      await page.waitForSelector('table tbody tr', { timeout: 5000 });
+      await page.waitForSelector('table tbody tr', { timeout: 8000 });
       
       const todasLasFilasAct = await page.locator('table tbody tr').all();
 
@@ -200,10 +243,10 @@ async function consultaRama(numeroProceso, jobId = null) {
         }
       }
 
-      console.log(`[scraping] ✅ Actuaciones encontradas: ${actuaciones.length}`);
+      console.log(`[scraping ${jobId}] ✅ Actuaciones encontradas: ${actuaciones.length}`);
       
     } catch (error) {
-      console.log(`[scraping] ❌ Error extrayendo actuaciones: ${error.message}`);
+      console.log(`[scraping ${jobId}] ❌ Error extrayendo actuaciones: ${error.message}`);
     }
 
     return {
@@ -217,7 +260,7 @@ async function consultaRama(numeroProceso, jobId = null) {
     };
 
   } catch (error) {
-    console.error("[scraping] ❌ Error:", error.message);
+    console.error(`[scraping ${jobId}] ❌ Error:`, error.message);
     throw error;
   } finally {
     await page.close();
@@ -245,34 +288,23 @@ app.get("/buscar", async (req, res) => {
     });
   }
 
-  // Crear job y devolver inmediatamente
+  // Crear job y agregarlo a la cola
   const jobId = createJob(soloDigitos);
-  console.log(`[job] 🆕 Creado: ${jobId} para ${radicado}`);
+  queue.push({ jobId, numeroRadicacion: radicado });
+  
+  console.log(`[job] 🆕 Creado: ${jobId} - En cola: ${queue.length}`);
 
-  // Iniciar scraping en background
-  consultaRama(radicado, jobId)
-    .then(resultado => {
-      console.log(`[job] ✅ Completado: ${jobId}`);
-      updateJob(jobId, { 
-        status: "completed", 
-        result: resultado 
-      });
-    })
-    .catch(error => {
-      console.error(`[job] ❌ Error: ${jobId}`, error);
-      updateJob(jobId, { 
-        status: "failed", 
-        error: error.message 
-      });
-    });
+  // Intentar procesar la cola
+  processQueue();
 
   // Responder inmediatamente con el jobId
   res.json({
     success: true,
     jobId: jobId,
     numero_radicacion: soloDigitos,
-    status: "processing",
-    message: "Búsqueda iniciada. Use /resultado/:jobId para consultar el resultado.",
+    status: "queued",
+    queue_position: queue.length,
+    message: "Búsqueda en cola. Use /resultado/:jobId para consultar el resultado.",
     poll_url: `/resultado/${jobId}`
   });
 });
@@ -286,6 +318,18 @@ app.get("/resultado/:jobId", (req, res) => {
     return res.status(404).json({
       success: false,
       error: "Job no encontrado o expirado"
+    });
+  }
+
+  if (job.status === "queued") {
+    const position = queue.findIndex(q => q.jobId === jobId) + 1;
+    return res.json({
+      success: true,
+      jobId: jobId,
+      status: "queued",
+      queue_position: position,
+      numero_radicacion: job.numero_radicacion,
+      message: `En cola. Posición: ${position}. Consulte nuevamente en unos segundos.`
     });
   }
 
@@ -322,6 +366,7 @@ app.get("/resultado/:jobId", (req, res) => {
 const PORT = process.env.PORT || 3000;
 const server = app.listen(PORT, () => {
   console.log(`🚀 API Rama Judicial escuchando en puerto ${PORT}`);
+  console.log(`📊 Configuración: Max ${MAX_CONCURRENT_JOBS} jobs simultáneos`);
 });
 
 server.requestTimeout = 120000;

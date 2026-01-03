@@ -106,77 +106,94 @@ async function consultaRama(numeroProceso) {
     
     let sujetosProcesales = [];
     try {
+      // Click en la pestaña
       await page.click('div.v-tab:has-text("Sujetos Procesales")');
-      await page.waitForTimeout(3000); // Esperar más tiempo
+      await page.waitForTimeout(3000);
       
-      // Intentar varios selectores posibles
-      const posiblesSelectores = [
-        'div.v-tab-item--active table tbody tr',
-        'table tbody tr td.text-left',
-        'tbody tr:has(td.text-left)',
-        'table:has(th:has-text("Tipo")) tbody tr'
-      ];
+      // Esperar que aparezca "Resultados encontrados" o la tabla
+      await page.waitForSelector('text=Resultados encontrados', { timeout: 10000 }).catch(() => {
+        console.log('[scraping] No se encontró texto "Resultados encontrados"');
+      });
       
-      let filasSujetos = [];
-      for (const selector of posiblesSelectores) {
-        try {
-          await page.waitForSelector(selector, { timeout: 5000 });
-          filasSujetos = await page.locator(selector).all();
-          if (filasSujetos.length > 0) {
-            console.log(`[scraping] ✅ Usando selector: ${selector}`);
-            break;
-          }
-        } catch (e) {
-          console.log(`[scraping] ⚠️ Selector no funcionó: ${selector}`);
-        }
-      }
-
-      for (const fila of filasSujetos) {
+      // Buscar TODAS las filas de tabla que tengan exactamente 2 celdas
+      const todasLasFilas = await page.locator('table tbody tr').all();
+      
+      console.log(`[scraping] 📊 Total de filas encontradas: ${todasLasFilas.length}`);
+      
+      for (const fila of todasLasFilas) {
         const celdas = await fila.locator('td').all();
-        if (celdas.length >= 2) {
+        
+        // Solo procesar filas con exactamente 2 celdas
+        if (celdas.length === 2) {
           const tipo = await celdas[0].innerText().catch(() => "");
           const nombre = await celdas[1].innerText().catch(() => "");
-
-          if (tipo.trim() && nombre.trim()) {
+          
+          const tipoLimpio = tipo.trim();
+          const nombreLimpio = nombre.trim();
+          
+          // Filtrar solo si tiene tipo válido
+          if ((tipoLimpio === 'Demandante' || tipoLimpio === 'Demandado') && nombreLimpio) {
             sujetosProcesales.push({
-              tipo: tipo.trim(),
-              nombre: nombre.trim(),
+              tipo: tipoLimpio,
+              nombre: nombreLimpio,
             });
           }
         }
       }
 
       console.log(`[scraping] ✅ Sujetos encontrados: ${sujetosProcesales.length}`);
+      
+      if (sujetosProcesales.length === 0) {
+        console.log('[scraping] ⚠️ ADVERTENCIA: No se encontraron sujetos procesales');
+      }
+      
     } catch (error) {
-      console.log(`[scraping] ⚠️ No se pudieron extraer sujetos procesales: ${error.message}`);
-      // Continuamos sin sujetos procesales
+      console.log(`[scraping] ❌ Error extrayendo sujetos: ${error.message}`);
     }
 
     // ================== ACTUACIONES ==================
     console.log("[scraping] 7. Extrayendo actuaciones...");
-    await page.click('div.v-tab:has-text("Actuaciones")');
-    await page.waitForTimeout(1500);
+    
+    let actuaciones = [];
+    try {
+      await page.click('div.v-tab:has-text("Actuaciones")');
+      await page.waitForTimeout(3000);
+      
+      // Esperar que aparezca "Resultados encontrados" o la tabla
+      await page.waitForSelector('text=Resultados encontrados', { timeout: 10000 }).catch(() => {
+        console.log('[scraping] No se encontró texto "Resultados encontrados" en actuaciones');
+      });
+      
+      // Buscar TODAS las filas de tabla
+      const todasLasFilasAct = await page.locator('table tbody tr').all();
+      
+      console.log(`[scraping] 📊 Total de filas actuaciones: ${todasLasFilasAct.length}`);
 
-    await page.waitForSelector('div.v-tab-item--active table tbody tr', { timeout: 10000 });
-
-    const actuaciones = [];
-    const filasAct = await page.locator('div.v-tab-item--active table tbody tr').all();
-
-    for (const fila of filasAct) {
-      const cols = await fila.locator("td").all();
-      if (cols.length >= 6) {
-        actuaciones.push({
-          "Fecha de Actuación": (await cols[0].innerText().catch(() => "")).trim(),
-          "Actuación": (await cols[1].innerText().catch(() => "")).trim(),
-          "Anotación": (await cols[2].innerText().catch(() => "")).trim(),
-          "Fecha inicia Término": (await cols[3].innerText().catch(() => "")).trim(),
-          "Fecha finaliza Término": (await cols[4].innerText().catch(() => "")).trim(),
-          "Fecha de Registro": (await cols[5].innerText().catch(() => "")).trim(),
-        });
+      for (const fila of todasLasFilasAct) {
+        const cols = await fila.locator("td").all();
+        
+        // Solo procesar filas con 6 o más columnas (actuaciones completas)
+        if (cols.length >= 6) {
+          actuaciones.push({
+            "Fecha de Actuación": (await cols[0].innerText().catch(() => "")).trim(),
+            "Actuación": (await cols[1].innerText().catch(() => "")).trim(),
+            "Anotación": (await cols[2].innerText().catch(() => "")).trim(),
+            "Fecha inicia Término": (await cols[3].innerText().catch(() => "")).trim(),
+            "Fecha finaliza Término": (await cols[4].innerText().catch(() => "")).trim(),
+            "Fecha de Registro": (await cols[5].innerText().catch(() => "")).trim(),
+          });
+        }
       }
-    }
 
-    console.log(`[scraping] ✅ Actuaciones encontradas: ${actuaciones.length}`);
+      console.log(`[scraping] ✅ Actuaciones encontradas: ${actuaciones.length}`);
+      
+      if (actuaciones.length === 0) {
+        console.log('[scraping] ⚠️ ADVERTENCIA: No se encontraron actuaciones');
+      }
+      
+    } catch (error) {
+      console.log(`[scraping] ❌ Error extrayendo actuaciones: ${error.message}`);
+    }
 
     // ================== RESULTADO FINAL ==================
     return {

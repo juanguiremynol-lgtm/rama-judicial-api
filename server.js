@@ -108,12 +108,10 @@ async function consultaRama(numeroProceso) {
     try {
       // Click en la pestaña
       await page.click('div.v-tab:has-text("Sujetos Procesales")');
-      await page.waitForTimeout(3000);
+      await page.waitForTimeout(2000);
       
-      // Esperar que aparezca "Resultados encontrados" o la tabla
-      await page.waitForSelector('text=Resultados encontrados', { timeout: 10000 }).catch(() => {
-        console.log('[scraping] No se encontró texto "Resultados encontrados"');
-      });
+      // Esperar que aparezca la tabla directamente
+      await page.waitForSelector('table tbody tr', { timeout: 8000 });
       
       // Buscar TODAS las filas de tabla que tengan exactamente 2 celdas
       const todasLasFilas = await page.locator('table tbody tr').all();
@@ -157,12 +155,10 @@ async function consultaRama(numeroProceso) {
     let actuaciones = [];
     try {
       await page.click('div.v-tab:has-text("Actuaciones")');
-      await page.waitForTimeout(3000);
+      await page.waitForTimeout(2000);
       
-      // Esperar que aparezca "Resultados encontrados" o la tabla
-      await page.waitForSelector('text=Resultados encontrados', { timeout: 10000 }).catch(() => {
-        console.log('[scraping] No se encontró texto "Resultados encontrados" en actuaciones');
-      });
+      // Esperar que aparezca la tabla directamente
+      await page.waitForSelector('table tbody tr', { timeout: 8000 });
       
       // Buscar TODAS las filas de tabla
       const todasLasFilasAct = await page.locator('table tbody tr').all();

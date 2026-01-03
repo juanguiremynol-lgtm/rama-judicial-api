@@ -227,23 +227,56 @@ async function consultaRama(numeroProceso, jobId = null) {
       await page.waitForSelector('table tbody tr', { timeout: 8000 });
       
       const todasLasFilasAct = await page.locator('table tbody tr').all();
+      console.log(`[scraping ${jobId}] 📊 Total filas en tabla: ${todasLasFilasAct.length}`);
 
       for (const fila of todasLasFilasAct) {
         const cols = await fila.locator("td").all();
         
-        if (cols.length >= 6) {
-          actuaciones.push({
-            "Fecha de Actuación": (await cols[0].innerText().catch(() => "")).trim(),
-            "Actuación": (await cols[1].innerText().catch(() => "")).trim(),
-            "Anotación": (await cols[2].innerText().catch(() => "")).trim(),
-            "Fecha inicia Término": (await cols[3].innerText().catch(() => "")).trim(),
-            "Fecha finaliza Término": (await cols[4].innerText().catch(() => "")).trim(),
-            "Fecha de Registro": (await cols[5].innerText().catch(() => "")).trim(),
-          });
+        console.log(`[scraping ${jobId}] 🔍 Fila con ${cols.length} columnas`);
+        
+        // Debe tener EXACTAMENTE 6 columnas
+        if (cols.length === 6) {
+          const fecha = (await cols[0].innerText().catch(() => "")).trim();
+          const actuacion = (await cols[1].innerText().catch(() => "")).trim();
+          const anotacion = (await cols[2].innerText().catch(() => "")).trim();
+          const fechaInicio = (await cols[3].innerText().catch(() => "")).trim();
+          const fechaFin = (await cols[4].innerText().catch(() => "")).trim();
+          const fechaRegistro = (await cols[5].innerText().catch(() => "")).trim();
+          
+          // VALIDACIONES:
+          // 1. Fecha debe tener formato YYYY-MM-DD
+          const esFecha = /^\d{4}-\d{2}-\d{2}$/.test(fecha);
+          
+          // 2. Actuación no debe ser encabezado
+          const esEncabezado = actuacion.toUpperCase().includes('ACTUACIÓN') ||
+                              actuacion.toUpperCase().includes('JUZGADO');
+          
+          // 3. Debe tener actuación válida
+          const tieneActuacion = actuacion.length > 2;
+          
+          if (esFecha && !esEncabezado && tieneActuacion) {
+            actuaciones.push({
+              "Fecha de Actuación": fecha,
+              "Actuación": actuacion,
+              "Anotación": anotacion,
+              "Fecha inicia Término": fechaInicio,
+              "Fecha finaliza Término": fechaFin,
+              "Fecha de Registro": fechaRegistro,
+            });
+            console.log(`[scraping ${jobId}] ✅ Actuación agregada: ${fecha} - ${actuacion}`);
+          } else {
+            console.log(`[scraping ${jobId}] ⏭️ Fila ignorada: "${fecha}" - "${actuacion}"`);
+          }
+        } else {
+          console.log(`[scraping ${jobId}] ⚠️ Fila con ${cols.length} columnas (se esperaban 6), ignorada`);
         }
       }
 
-      console.log(`[scraping ${jobId}] ✅ Actuaciones encontradas: ${actuaciones.length}`);
+      console.log(`[scraping ${jobId}] ✅ Total actuaciones capturadas: ${actuaciones.length}`);
+      
+      if (actuaciones.length === 0) {
+        console.log(`[scraping ${jobId}] ⚠️ ADVERTENCIA: No se encontraron actuaciones válidas`);
+      }
       
     } catch (error) {
       console.log(`[scraping ${jobId}] ❌ Error extrayendo actuaciones: ${error.message}`);

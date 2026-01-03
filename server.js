@@ -103,31 +103,54 @@ async function consultaRama(numeroProceso) {
 
     // ================== SUJETOS PROCESALES ==================
     console.log("[scraping] 6. Extrayendo sujetos procesales...");
-    await page.click('div.v-tab:has-text("Sujetos Procesales")');
-    await page.waitForTimeout(1500);
-
-    // Esperar a que se cargue la tabla dentro de la pestaña activa
-    await page.waitForSelector('div.v-tab-item--active table tbody tr', { timeout: 10000 });
-
-    const sujetosProcesales = [];
-    const filasSujetos = await page.locator('div.v-tab-item--active table tbody tr').all();
-
-    for (const fila of filasSujetos) {
-      const celdas = await fila.locator('td').all();
-      if (celdas.length >= 2) {
-        const tipo = await celdas[0].innerText().catch(() => "");
-        const nombre = await celdas[1].innerText().catch(() => "");
-
-        if (tipo.trim() && nombre.trim()) {
-          sujetosProcesales.push({
-            tipo: tipo.trim(),
-            nombre: nombre.trim(),
-          });
+    
+    let sujetosProcesales = [];
+    try {
+      await page.click('div.v-tab:has-text("Sujetos Procesales")');
+      await page.waitForTimeout(3000); // Esperar más tiempo
+      
+      // Intentar varios selectores posibles
+      const posiblesSelectores = [
+        'div.v-tab-item--active table tbody tr',
+        'table tbody tr td.text-left',
+        'tbody tr:has(td.text-left)',
+        'table:has(th:has-text("Tipo")) tbody tr'
+      ];
+      
+      let filasSujetos = [];
+      for (const selector of posiblesSelectores) {
+        try {
+          await page.waitForSelector(selector, { timeout: 5000 });
+          filasSujetos = await page.locator(selector).all();
+          if (filasSujetos.length > 0) {
+            console.log(`[scraping] ✅ Usando selector: ${selector}`);
+            break;
+          }
+        } catch (e) {
+          console.log(`[scraping] ⚠️ Selector no funcionó: ${selector}`);
         }
       }
-    }
 
-    console.log(`[scraping] ✅ Sujetos encontrados: ${sujetosProcesales.length}`);
+      for (const fila of filasSujetos) {
+        const celdas = await fila.locator('td').all();
+        if (celdas.length >= 2) {
+          const tipo = await celdas[0].innerText().catch(() => "");
+          const nombre = await celdas[1].innerText().catch(() => "");
+
+          if (tipo.trim() && nombre.trim()) {
+            sujetosProcesales.push({
+              tipo: tipo.trim(),
+              nombre: nombre.trim(),
+            });
+          }
+        }
+      }
+
+      console.log(`[scraping] ✅ Sujetos encontrados: ${sujetosProcesales.length}`);
+    } catch (error) {
+      console.log(`[scraping] ⚠️ No se pudieron extraer sujetos procesales: ${error.message}`);
+      // Continuamos sin sujetos procesales
+    }
 
     // ================== ACTUACIONES ==================
     console.log("[scraping] 7. Extrayendo actuaciones...");

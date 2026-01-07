@@ -1,6 +1,6 @@
 {
   "name": "rama-judicial-api",
-  "version": "2.0.0",
+  "version": "4.1.0",
   "description": "API para consultar procesos judiciales en Rama Judicial Colombia",
   "main": "server.js",
   "scripts": {
@@ -10,8 +10,19 @@
     "node": ">=18"
   },
   "dependencies": {
-    "express": "^4.19.2",
     "cors": "^2.8.5",
-    "playwright": "1.57.0"
-  }
+    "express": "^4.22.1",
+    "playwright": "^1.57.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/juanguiremynol-lgtm/rama-judicial-api.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/juanguiremynol-lgtm/rama-judicial-api/issues"
+  },
+  "homepage": "https://github.com/juanguiremynol-lgtm/rama-judicial-api#readme"
 }

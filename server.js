@@ -19,7 +19,7 @@ app.use(cors({ origin: "*", methods: ["GET"], allowedHeaders: ["Content-Type"] }
 const jobs = new Map();
 const queue = [];
 let activeJobs = 0;
-const MAX_CONCURRENT_JOBS = 2; // Máximo 2 scraping simultáneos
+const MAX_CONCURRENT_JOBS = 2;
 
 function createJob(numeroRadicacion) {
   const jobId = `job_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -40,7 +40,6 @@ function updateJob(jobId, updates) {
   }
 }
 
-// Procesar jobs en cola
 async function processQueue() {
   if (activeJobs >= MAX_CONCURRENT_JOBS || queue.length === 0) {
     return;
@@ -67,11 +66,10 @@ async function processQueue() {
     });
   } finally {
     activeJobs--;
-    processQueue(); // Procesar siguiente
+    processQueue();
   }
 }
 
-// Limpiar jobs viejos cada 10 minutos
 setInterval(() => {
   const now = Date.now();
   for (const [jobId, job] of jobs.entries()) {
@@ -85,7 +83,7 @@ setInterval(() => {
 app.get("/", (_req, res) =>
   res.json({
     message: "API Rama Judicial Colombia",
-    version: "3.1",
+    version: "3.2",
     endpoints: {
       "/health": "Estado de la API",
       "/buscar?numero_radicacion=XXXXX": "Iniciar búsqueda (devuelve jobId)",
@@ -139,10 +137,7 @@ async function consultaRama(numeroProceso, jobId = null) {
 
     console.log(`[scraping ${jobId}] 2. Llenando input...`);
     await page.waitForSelector("input[placeholder*='23 dígitos']", { timeout: 15000 });
-    await page.fill(
-      "input[placeholder*='23 dígitos']",
-      soloDigitos
-    );
+    await page.fill("input[placeholder*='23 dígitos']", soloDigitos);
 
     console.log(`[scraping ${jobId}] 3. Consultando...`);
     await page.click("button:has-text('Consultar')");
@@ -226,16 +221,17 @@ async function consultaRama(numeroProceso, jobId = null) {
       await page.click('div.v-tab:has-text("Actuaciones")');
       await page.waitForSelector('table tbody tr', { timeout: 8000 });
       
+      // Esperar un momento adicional para que la tabla se cargue completamente
+      await page.waitForTimeout(1000);
+      
       const todasLasFilasAct = await page.locator('table tbody tr').all();
       console.log(`[scraping ${jobId}] 📊 Total filas en tabla: ${todasLasFilasAct.length}`);
 
       for (const fila of todasLasFilasAct) {
         const cols = await fila.locator("td").all();
         
-        console.log(`[scraping ${jobId}] 🔍 Fila con ${cols.length} columnas`);
-        
-        // Debe tener EXACTAMENTE 6 columnas
-        if (cols.length === 6) {
+        // La tabla tiene 6 o 7 columnas (6 de datos + posiblemente 1 vacía)
+        if (cols.length >= 6) {
           const fecha = (await cols[0].innerText().catch(() => "")).trim();
           const actuacion = (await cols[1].innerText().catch(() => "")).trim();
           const anotacion = (await cols[2].innerText().catch(() => "")).trim();
@@ -243,32 +239,25 @@ async function consultaRama(numeroProceso, jobId = null) {
           const fechaFin = (await cols[4].innerText().catch(() => "")).trim();
           const fechaRegistro = (await cols[5].innerText().catch(() => "")).trim();
           
-          // VALIDACIONES:
-          // 1. Fecha debe tener formato YYYY-MM-DD
-          const esFecha = /^\d{4}-\d{2}-\d{2}$/.test(fecha);
+          // Validación: debe tener formato de fecha válido
+          const esFechaValida = /^\d{4}-\d{2}-\d{2}$/.test(fecha);
           
-          // 2. Actuación no debe ser encabezado
-          const esEncabezado = actuacion.toUpperCase().includes('ACTUACIÓN') ||
-                              actuacion.toUpperCase().includes('JUZGADO');
+          // Validación: la actuación no debe estar vacía
+          const tieneActuacion = actuacion.length > 0;
           
-          // 3. Debe tener actuación válida
-          const tieneActuacion = actuacion.length > 2;
-          
-          if (esFecha && !esEncabezado && tieneActuacion) {
+          if (esFechaValida && tieneActuacion) {
             actuaciones.push({
-              "Fecha de Actuación": fecha,
-              "Actuación": actuacion,
-              "Anotación": anotacion,
-              "Fecha inicia Término": fechaInicio,
-              "Fecha finaliza Término": fechaFin,
-              "Fecha de Registro": fechaRegistro,
+              "Fecha de Actuación": fecha || "0",
+              "Actuación": actuacion || "0",
+              "Anotación": anotacion || "0",
+              "Fecha inicia Término": fechaInicio || "0",
+              "Fecha finaliza Término": fechaFin || "0",
+              "Fecha de Registro": fechaRegistro || "0",
             });
             console.log(`[scraping ${jobId}] ✅ Actuación agregada: ${fecha} - ${actuacion}`);
           } else {
-            console.log(`[scraping ${jobId}] ⏭️ Fila ignorada: "${fecha}" - "${actuacion}"`);
+            console.log(`[scraping ${jobId}] ⏭️ Fila ignorada (no es actuación válida): "${fecha}" - "${actuacion}"`);
           }
-        } else {
-          console.log(`[scraping ${jobId}] ⚠️ Fila con ${cols.length} columnas (se esperaban 6), ignorada`);
         }
       }
 
@@ -302,7 +291,6 @@ async function consultaRama(numeroProceso, jobId = null) {
 
 // ================== ENDPOINTS ==================
 
-// Iniciar búsqueda (devuelve jobId inmediatamente)
 app.get("/buscar", async (req, res) => {
   const radicado = req.query.numero_radicacion;
   
@@ -321,16 +309,13 @@ app.get("/buscar", async (req, res) => {
     });
   }
 
-  // Crear job y agregarlo a la cola
   const jobId = createJob(soloDigitos);
   queue.push({ jobId, numeroRadicacion: radicado });
   
   console.log(`[job] 🆕 Creado: ${jobId} - En cola: ${queue.length}`);
 
-  // Intentar procesar la cola
   processQueue();
 
-  // Responder inmediatamente con el jobId
   res.json({
     success: true,
     jobId: jobId,
@@ -342,7 +327,6 @@ app.get("/buscar", async (req, res) => {
   });
 });
 
-// Consultar resultado de un job
 app.get("/resultado/:jobId", (req, res) => {
   const { jobId } = req.params;
   const job = jobs.get(jobId);

@@ -217,6 +217,8 @@ async function consultaRama(numeroProceso, jobId = null) {
     console.log(`[scraping ${jobId}] 7. Extrayendo actuaciones...`);
     
     let actuaciones = [];
+    let resultadosEsperados = 0;
+    
     try {
       await page.click('div.v-tab:has-text("Actuaciones")');
       await page.waitForSelector('table tbody tr', { timeout: 8000 });
@@ -224,13 +226,27 @@ async function consultaRama(numeroProceso, jobId = null) {
       // Esperar un momento adicional para que la tabla se cargue completamente
       await page.waitForTimeout(1000);
       
+      // Extraer el número de resultados esperados
+      try {
+        const textoResultados = await page.locator('span:has-text("Resultados encontrados")').innerText();
+        const match = textoResultados.match(/(\d+)/);
+        if (match) {
+          resultadosEsperados = parseInt(match[1]);
+          console.log(`[scraping ${jobId}] 📊 Resultados esperados según página: ${resultadosEsperados}`);
+        }
+      } catch (error) {
+        console.log(`[scraping ${jobId}] ⚠️ No se pudo extraer número de resultados esperados`);
+      }
+      
       const todasLasFilasAct = await page.locator('table tbody tr').all();
       console.log(`[scraping ${jobId}] 📊 Total filas en tabla: ${todasLasFilasAct.length}`);
 
       for (const fila of todasLasFilasAct) {
         const cols = await fila.locator("td").all();
         
-        // La tabla tiene 6 o 7 columnas (6 de datos + posiblemente 1 vacía)
+        console.log(`[scraping ${jobId}] 🔍 Fila con ${cols.length} columnas`);
+        
+        // La tabla puede tener 6 o 7 columnas
         if (cols.length >= 6) {
           const fecha = (await cols[0].innerText().catch(() => "")).trim();
           const actuacion = (await cols[1].innerText().catch(() => "")).trim();
@@ -239,13 +255,25 @@ async function consultaRama(numeroProceso, jobId = null) {
           const fechaFin = (await cols[4].innerText().catch(() => "")).trim();
           const fechaRegistro = (await cols[5].innerText().catch(() => "")).trim();
           
-          // Validación: debe tener formato de fecha válido
+          // Si hay 7 columnas, la última también puede ser fecha de registro
+          const columna7 = cols.length >= 7 ? (await cols[6].innerText().catch(() => "")).trim() : "";
+          
+          // Validación 1: debe tener formato de fecha válido
           const esFechaValida = /^\d{4}-\d{2}-\d{2}$/.test(fecha);
           
-          // Validación: la actuación no debe estar vacía
+          // Validación 2: la actuación no debe estar vacía
           const tieneActuacion = actuacion.length > 0;
           
-          if (esFechaValida && tieneActuacion) {
+          // Validación 3: NO debe ser un encabezado de juzgado/tribunal
+          const esEncabezadoJuzgado = actuacion.toUpperCase().includes('JUZGADO') ||
+                                      actuacion.toUpperCase().includes('TRIBUNAL') ||
+                                      actuacion.toUpperCase().includes('CORTE');
+          
+          // Validación 4: NO debe ser encabezado de tabla
+          const esEncabezadoTabla = actuacion.toUpperCase().includes('ACTUACIÓN') && 
+                                    !esFechaValida;
+          
+          if (esFechaValida && tieneActuacion && !esEncabezadoJuzgado && !esEncabezadoTabla) {
             actuaciones.push({
               "Fecha de Actuación": fecha || "0",
               "Actuación": actuacion || "0",
@@ -253,15 +281,23 @@ async function consultaRama(numeroProceso, jobId = null) {
               "Fecha inicia Término": fechaInicio || "0",
               "Fecha finaliza Término": fechaFin || "0",
               "Fecha de Registro": fechaRegistro || "0",
+              "Columna 7": columna7 || "0",
             });
             console.log(`[scraping ${jobId}] ✅ Actuación agregada: ${fecha} - ${actuacion}`);
           } else {
-            console.log(`[scraping ${jobId}] ⏭️ Fila ignorada (no es actuación válida): "${fecha}" - "${actuacion}"`);
+            console.log(`[scraping ${jobId}] ⏭️ Fila ignorada: "${fecha}" - "${actuacion}" (encabezado=${esEncabezadoJuzgado || esEncabezadoTabla})`);
           }
         }
       }
 
       console.log(`[scraping ${jobId}] ✅ Total actuaciones capturadas: ${actuaciones.length}`);
+      
+      // Validar que se capturaron todas las actuaciones esperadas
+      if (resultadosEsperados > 0 && actuaciones.length !== resultadosEsperados) {
+        console.log(`[scraping ${jobId}] ⚠️ ADVERTENCIA: Se esperaban ${resultadosEsperados} actuaciones pero se capturaron ${actuaciones.length}`);
+      } else if (resultadosEsperados > 0) {
+        console.log(`[scraping ${jobId}] ✅ VERIFICADO: Se capturaron las ${resultadosEsperados} actuaciones esperadas`);
+      }
       
       if (actuaciones.length === 0) {
         console.log(`[scraping ${jobId}] ⚠️ ADVERTENCIA: No se encontraron actuaciones válidas`);
@@ -278,6 +314,8 @@ async function consultaRama(numeroProceso, jobId = null) {
       sujetos_procesales: sujetosProcesales,
       actuaciones: actuaciones,
       total_actuaciones: actuaciones.length,
+      actuaciones_esperadas: resultadosEsperados,
+      validacion_completa: resultadosEsperados === 0 || actuaciones.length === resultadosEsperados,
       ultima_actuacion: actuaciones[0] || null,
     };
 
